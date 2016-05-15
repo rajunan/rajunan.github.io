@@ -1,0 +1,832 @@
+---
+title: "Prosper Loans - P2P Lending Explored"
+author: "Raju Nanduri"
+date: "6 March 2016"
+output: html_document
+---
+========================================================  
+Prosper is a peer to peer lending company that offers personal loans at low rates. These loans are unsecured, which means you do not have to put up any collateral (like a house or car) that could get taken away if you can't make payments. Each loan is typically funded by multiple people all over the United States. In this way, Prosper is a marketplace connecting those who need a loan to those who have extra money to lend. Individuals can either invest in personal loans or request to borrow money. I was particularly interested in exploring this dataset as I had just finished reading the Big Short from Michael Lewis. He narrates in much detail of how  greedy wallstreet bankers choose to chase the money at any cost. The loan orgination became overly complicated by adding numerous layers of abstractions aka securitization. Ultimately this led to total disregard and actually allowed the convenient manipulation of the lending process at it's core.  
+In contrast, briefly reading up about the prosper.com P2P business model, I was keen to understand how prosper.com loan origination prospered. Interestingly prosper.com was in the midst of its Series C (third round) of funding around mid 2008. Just around that time Wallstreet was massively imploding leading up to the Lehman crisis.
+Note: Post "dabbling" in the prosper data it is clear that subprime loans vs P2P vary in orders of magnitude. Nevertheless the basic principle of risk vs returns applies here as well.
+
+Useful links:  
+
+* [Prosper Funding Rounds -CrunchBase](https://www.crunchbase.com/organization/prosper#/entity)  
+* [Addl. information re peer-to-peer lending](http://www.consumerreports.org/cro/news/2015/01/what-to-know-about-lending-club-and-prosper-peer-to-peer/index.htm)  
+* [Borrower compliants](http://www.lendingmemo.com/prosper-loan-complaints/)  
+* [How to read prosper loan listing and key parameters](https://www.prosper.com/help/topics/how-to-read-a-loan-listing/)  
+
+
+Some paramater definitions:  
+
+* Prosper rating = proprietary Prosper rating which grades listing's level of risk. 
+* [Prosper score](https://www.prosper.com/help/topics/general-prosper_score) = custom risk score using historical Prosper data. Ranges from 1 to 11, with 11 being the best, or lowest risk score. Both the custom score and the credit reporting agency score together are used to assess the borrower's level of risk and determine estimated loss rates  
+* Credit score = range of borrower's credit score as provided by consumer credit rating agency in a recent credit inquiry
+* Effective Yield = borrower rate - svc fee - est uncollected interest on charge-offs + est collected late fees
+* [Estimated loss rate](https://www.prosper.com/plp/general-estimated_loss_rates/) = is based on the historical performance of Prosper loans with similar characteristics. The base loss rate is determined by two scores:
+    + a custom Prosper Score and 
+    + the FICO®08 score. 
+    + Adjustments can be made to the base loss rate based on additional characteristics, such as the presence of a previous Prosper loan. Any adjustments are added to the base rate to get the final loss rate, which then determines the Prosper Rating
+
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=12, fig.height=8,echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r load_lib}
+# Load libs ####
+library(ggplot2)
+library(GGally)
+library(gridExtra)
+library(dplyr)
+library(stats)
+```
+
+``` {r standard_plots}
+#bar plots 
+my.bar.plots <- function(d,xx,yy,ttitle,xlab,ylab) {
+  return (
+    ggplot(data=d, aes(x=xx, y=yy))+
+      geom_bar(stat="identity")+
+      labs(title=ttitle, x=xlab, y=ylab)
+    )
+}
+
+#box plots with average stat
+my.box.plots <-function(d,xx,yy,ttitle,xlab,ylab){
+  return(
+    ggplot(data=d, aes(x=xx, y=yy))+
+      geom_boxplot()+
+      stat_summary(fun.y=mean, geom="point",pch=24,color="blue")+
+      stat_summary(fun.y=mean, geom="line",aes(group=1),color="orange",lwd=1)+
+      labs(title=ttitle, x=xlab, y=ylab)
+    )
+}
+
+```
+
+```{r load_fix_data}
+# Load data, apply fixes and add utilility data ####
+pl <- read.csv('prosperLoanData.csv')
+str(pl,width=100, strict.width = "cut")
+pl$LoanOriginationDate <- as.Date(pl$LoanOriginationDate) # factor to date
+#Extract year to make it easier to filter by year
+pl$LoanOriginationDate.Y <- strftime(pl$LoanOriginationDate, "%Y")
+#table(pl$LoanOriginationDate.Y)
+```
+***
+
+```{r align_ratings_loanstatus}
+#Check ratings for loans bef Jul'09 i.e. can use numeric rating? 
+#table(pl$ProsperRating..Alpha.)
+#table(pl$CreditGrade)
+#table(subset(pl,ProsperRating..Alpha. == "")$ProsperRating..numeric.) 
+# => no numeric ratings for before July 2009
+#table(subset(pl,ProsperRating..Alpha. == "")$CreditGrade) #but credit grade available
+
+#Insight: use Alpha for post July 2009 and Credit Grade for pre July 2009
+
+#Clubbing ratings for both periods for further analysis
+pl$ConcatenatedRating <- pl$ProsperRating..Alpha. #Make copy of Alpha
+#table(pl$ConcatenatedRating)
+pl.subset.Alpha.blank <- subset(pl,ProsperRating..Alpha. == "")
+pl.subset.Alpha.nonblank <- subset(pl,ProsperRating..Alpha. != "")
+pl.subset.Alpha.blank$ConcatenatedRating <- pl.subset.Alpha.blank$CreditGrade #Replace blanks with Credit Grade
+
+pl <- rbind(pl.subset.Alpha.blank,pl.subset.Alpha.nonblank) #merge back both subsets
+
+#Ordering of rating
+order.ratings=c("AA","A","B","C","D","E","HR")
+pl$ConcatenatedRating <- 
+  factor(pl$ConcatenatedRating,
+         levels = order.ratings, 
+         ordered = T)
+
+#Order ProsperScore which ranges from 1 to 11, with 11 lowest risk
+pl$ProsperScore <- factor(pl$ProsperScore)
+pl$ProsperScore = factor(pl$ProsperScore,levels(pl$ProsperScore)[c(11:1)])
+
+#Reassign proper labels for listing category
+listingCat.labels <- c("NA", "Debt", "HomImp", "Biz", "Personal", "Student", "Auto", "Other", "Baby", "Boat", "Costmetic", "Engagement", "GreenLoans", "HomExp", "LargePurch", "Med", "Mbike", "RV", "Tax", "Vacation", "Wedding")
+pl$ListingCategory <- factor(pl$ListingCategory..numeric., labels=listingCat.labels)
+
+#Create mean score to assess risk rather than upper and lower 
+pl$MeanCreditScore <- rowMeans(cbind(pl$CreditScoreRangeLower,
+                                     pl$CreditScoreRangeUpper))
+
+#Regroup loan status to binary green = healthy vs red = gone sour
+#summary(pl$LoanStatus)
+pl$LoanStatus.health <- pl$LoanStatus
+#Group Chargedoff, Defaulted and Past due as loans gone sour
+levels(pl$LoanStatus.health) <- 
+  c("good","bad","good",
+    "good","bad","good",
+    "bad","bad","bad",
+    "bad","bad","bad")
+
+#Subset prosper loans where rating is available
+pl_subset.rating_available <- subset(pl,!is.na(ConcatenatedRating))
+
+```
+
+##### Basic trends of Prosper Loans 
+```{r basic_trends}
+#  Loan volume in oringations of loans by year
+p11 <- ggplot(data=pl, aes(x=LoanOriginationDate.Y))+
+  geom_bar()+
+  labs(title="Number of loans per year", x="Orgination year", y="# Loans")
+p12 <- my.bar.plots(
+  pl, pl$LoanOriginationDate.Y, pl$LoanOriginalAmount/1000000,
+  "Loans per year in mil $",
+  "Orgination year", "Loan amount in mil US dollars")
+
+grid.arrange(p11,p12,nrow=1)
+#[table(subset(pl,LoanOriginationDate.Y=="2014")$LoanOriginationQuarter)
+```
+  
+*...There is stark dip in loans made around 2009. This is not surprising given this is around the time of subprime crisis. Loan amounts also fluctuate over the years with steady return to pre-2009 period and significant acceleration from 2012 onwards.
+Note: 2014 includes only Q1 data however loan values are already at 2013 exit levels with only just around half of the 2013 loans orginated*
+
+```{r loan_val_yearly}
+my.box.plots(
+  pl, pl$LoanOriginationDate.Y, pl$LoanOriginalAmount,
+  "Loan value distribution per year and average loan",
+  "Origination year", "Loan amount")+
+  scale_y_continuous(limits=c(0,15000),breaks=seq(1000,15000,1000))
+
+```
+
+*... significant shift in the median loan value from 2012 to 2013. Average loan amounts are trending higher with a decent spread*
+  
+***
+
+##### Loan orignation distribution  ####
+``` {r lv_distribution}
+ggplot(data=pl_subset.rating_available,
+       aes(x=LoanOriginalAmount)) +
+  geom_histogram(binwidth=500, color = 'white')+
+  scale_x_continuous(breaks=seq(0,36000,5000))+
+  scale_y_sqrt()+
+  guides(fill=FALSE)+
+  ggtitle("Loan value distribution (from 2005), bin size = 500")
+```
+  
+*...loan amounts spike around the 5000 ranges and are interestingly normally distributed in the mid ranges. Execption are 4000$ loans*
+  
+##### Loan orignation distribution by rating  ####
+``` {r lv_by_rating}
+p1 <- ggplot(data=pl_subset.rating_available,
+       aes(x=ConcatenatedRating))+
+  geom_bar()+
+  labs(x="AA is lowest risk, HR is highest risk",
+       y="#Loan orginations")+
+  ggtitle("#Loans orginated by rating")
+
+p2 <- my.box.plots(
+  pl_subset.rating_available,
+  pl_subset.rating_available$ConcatenatedRating,
+  pl_subset.rating_available$LoanOriginalAmount,
+  "Loan amounts distribution by rating + mean line",
+  "AA is lowest risk, HR is highest risk",
+  "Loan amounts")+
+  scale_y_continuous(breaks=seq(1000,15000,1000))+
+  coord_cartesian(ylim=c(1000,16000))
+
+grid.arrange(p1,p2,nrow=1)  
+```
+  
+*... decent normal distribution of loans by rating, suggesting maturity in lending confidence over time. Not so surprising is that the median value of loans decreases as risk increases*
+
+##### Loan orignation distribution by rating over the years ####
+```{r lv_rating_yearly_trends}
+ggplot(data=subset(pl,!is.na(ConcatenatedRating)),
+       aes(x=ConcatenatedRating, y=LoanOriginalAmount))+
+  geom_boxplot()+
+  stat_summary(fun.y=mean, geom="point",pch=24,color="blue")+
+  stat_summary(fun.y=mean, geom="line",aes(group=1),color="orange",lwd=1)+
+  scale_y_continuous(breaks=seq(1000,20000,1000))+
+  coord_cartesian(ylim=c(1000,20000))+
+  labs(x="AA is lowest risk, HR is highest risk",
+       y="Loan amounts")+
+  facet_wrap(~LoanOriginationDate.Y,2,scales="free_y")+
+  ggtitle("Loan amounts distribution by rating by year")
+```
+  
+*... trend over the year shows pick up in lower rated loans. However for the higher risk loans from 2011 onwards the box plots suggest decreasing variability ... IQR = 0 in some cases! Especially 2013 has some "strange"" box plots for E and HR*
+
+```{r lv_ratings_deepdive}
+#Investigation of 2013 higher risk loans
+loanValYear2013 <- subset(pl,LoanOriginationDate.Y=="2013")
+#by(tmp$LoanOriginalAmount, tmp$ConcatenatedRating,summary)
+p1 <- ggplot(data=loanValYear2013,
+             aes(x=ConcatenatedRating, y=LoanOriginalAmount))+
+  geom_boxplot()+
+  coord_cartesian(ylim=c())+
+  ggtitle("2013 loans deep dive ...")+
+  labs(x="AA is lowest risk, HR is highest risk")
+
+p2 <- ggplot(data=loanValYear2013,
+             aes(x=LoanOriginalAmount))+
+  geom_histogram(binwidth = 500)+
+  scale_x_continuous(breaks=seq(0,100000,10000))+
+  facet_wrap(~ConcatenatedRating,1,scales="free_y")
+#p2
+grid.arrange(p1,p2,nrow=2)
+```
+  
+*...digging into 2013 makes it clear that for risk rating E and HR there is very little variability. It would be very interesting to understand these loans in more detail (to who are these being made to? what is the investor profile? etc)*
+
+***
+##### Trending of loan ratings and vs prosperscore ####
+``` {r lv_rating_vs_prosperScore}
+#Loan distribution by rating over the years
+#AA, A, B, C, D, E, HR
+color.stack <- c("green4","green3","green2","yellow2", "coral2","coral3","coral4")
+ggplot(data=pl_subset.rating_available, 
+       aes(x=LoanOriginationDate.Y,
+           fill=ConcatenatedRating,
+           order=-as.numeric(ConcatenatedRating)))+
+  geom_bar(position="fill")+
+  scale_fill_manual(values=color.stack)+
+  guides(fill = guide_legend(reverse = TRUE))+
+  theme(axis.ticks.y=element_blank())+
+  labs(title="Loan originations by year and rating",
+       x="Origination year", y="% of loans")+
+  ggtitle("Number of Prosper loans by year and rating")
+
+#table(pl$LoanOriginationDate.Y)
+ggplot(data=subset(pl,!is.na(ProsperScore)),
+       aes(fill=ProsperScore, x=LoanOriginationDate.Y))+
+  geom_bar(position="fill", color="white")+
+  scale_fill_discrete(name="Prosper score \n(1= HR)",
+                      guide = guide_legend(reverse=T))+
+  labs(title="Risk rating and borrower credit score trends",
+       x="Listing rating (AA=lowest risk)",
+       y="% of loans")+
+  facet_wrap(~ConcatenatedRating)
+```
+  
+*The year on year trend of loans by risk rating shows significant upwards trend of higher quality loans (AA, A, B & C)*  
+*... further the listing rating vs underlying prosper score of borrowers trend shows a clear maturity in risk grading and significant alignment of   listing rating to borrower profiles. Interestingly there is a shift towards "riskier lending practices" over the years: e.g. AA listings in 2012 has borrowers with a score at least 8 or higher, whereas in 2013 borrowers of with score of 7 and 6 are included and in 2014 even those with score of 5 are offered loans*
+
+***
+##### Review of loan details (ListingCat, Recommendations...) ####
+``` {r dump_loan_details}
+print("... Loans by ListingCategory")
+sort(table(pl_subset.rating_available$ListingCategory),decreasing=T)
+
+print("... Loans by Recommendations")
+table(pl_subset.rating_available$Recommendations)
+
+print("... Loans by InvestmentFromFriendsCount")
+table(pl_subset.rating_available$InvestmentFromFriendsCount)
+
+print("... Loans by EstimatedEffectiveYield")
+summary(pl_subset.rating_available$EstimatedEffectiveYield)
+
+print("... Loans by DebtToIncomeRatio")
+summary(pl_subset.rating_available$DebtToIncomeRatio)
+
+print("... Loans by StatedMonthlyIncome")
+summary(pl_subset.rating_available$StatedMonthlyIncome)
+```
+
+*... by reviewing some of the relevant loan characteristics (subset to those where a rating is available) following analysis*  
+*- bulk of the loans are to pay of debt and remaining are across various different categories. There are quite a few NA and Other which would be interesting to drill down into. Interestingly I would have imagined that debt category would be smaller portion of the loans. This is an area which would need to be futher investigated*  
+*- loans made on back of recommendations shows that nearly all loans are not through referrals*  
+*- similarly fewer investments are made from friends. I would imagine that for those seeking loans the amounts are large enough such that friends from similar income class would be rarely in a position to help out*  
+*- effective yield has a signifcant variation and interestingly quite few loans without any estimates. Also some outliers in the lower quartile with negative yields. This could be possibly due to bad loans in the earlier years leading up to pre-crisis years*  
+*- Debt to income ratio is extremely skewed esp in the upper quartile with 75% of loans in my view having a reasonable debt to income ratio of 0.32. I would imagine that splitting this by risk rating would show a differentiated picture*   
+*- similarly for monthly income and excluding the huge outliers, the spread seems reasonable though the upper quartile is "heavier". Possibly (and as earlier in the loan development) due to maturing of the prosper loan origination due diligence.*
+
+***
+##### Financial returns ####
+```{r financial_returns}
+p1 <- my.box.plots(pl_subset.rating_available,
+               pl_subset.rating_available$ConcatenatedRating,
+               pl_subset.rating_available$LenderYield,
+               "Lender yield by risk",
+               "AA is lowest risk, HR is highest risk","LenderYield")+
+  scale_y_continuous(breaks=seq(0,0.35,0.01))+
+  coord_cartesian(ylim=c(0.05,0.30))
+p2 <- my.box.plots(pl_subset.rating_available,
+             pl_subset.rating_available$ConcatenatedRating,
+             pl_subset.rating_available$EstimatedReturn,
+             "Estimated return by risk",
+             "AA is lowest risk, HR is highest risk","Estimated return")+
+  scale_y_continuous(breaks=seq(0,0.35,0.01))+
+  coord_cartesian(ylim=c(0.05,0.30))
+p3 <- ggplot(data=subset(pl,!is.na(EstimatedReturn)),
+       aes(x=ConcatenatedRating, y=EstimatedReturn/LenderYield))+
+  geom_boxplot()+
+  stat_summary(fun.y=mean, geom="point",pch=24,color="blue")+
+  stat_summary(fun.y=mean, geom="line",aes(group=1),color="orange",lwd=1)+
+  scale_y_continuous(breaks=seq(0,1,0.1))+
+  coord_cartesian(ylim=c(0.35,.9))+
+  labs(title="Estimated return by risk",
+       x="AA is lowest risk, HR is highest risk",y="ROI (return/yield)")
+grid.arrange(p1,p2,p3,nrow=1)
+```
+  
+*... Margins for high risk loans are significantly higher and ROI drops significantly (Returns/Yield). Presumably premium on risk is key factor for this distortion*
+
+```{r lender_yield_distrib}
+ggplot(data=pl,
+       aes(x=LenderYield))+
+  geom_histogram(binwidth = 0.005, color="white")+
+  scale_x_continuous(limits = c(0.0,0.35),breaks=seq(0.0,0.4,0.01))+
+  scale_y_sqrt(breaks=seq(0,6000,1000))
+p1 <- ggplot(data=subset(pl,!is.na(EstimatedReturn)),
+       aes(x=EstimatedReturn))+
+  geom_histogram(binwidth = 0.005, color="white")+
+  scale_x_continuous(limits = c(0.0,0.26),breaks=seq(0.0,0.2,0.02))+
+  scale_y_sqrt(breaks=seq(0,6000,1000))
+p2 <- ggplot(data=subset(pl,!is.na(EstimatedReturn)),
+       aes(x=EstimatedReturn/LenderYield))+
+  geom_histogram(binwidth = 0.05, color="white")+
+  scale_x_continuous(limits = c(0.0,1),breaks=seq(0.0,1,0.1))+
+  scale_y_sqrt(breaks=seq(0,6000,1000))
+grid.arrange(p1,p2,nrow=1)
+```
+ 
+*...Lender yield has outliers at 30% and mainly in 2012 and another outlier at 35%. Estimated return is a pretty well normallly distributed.
+ROI i.e. returns compared to forecasted yield has significantly narrower spread*
+
+```{r estimated_loss_rate}
+#Estimated loss by risk rating
+p1 <- my.box.plots(
+  pl_subset.rating_available,
+  pl_subset.rating_available$ConcatenatedRating, 
+  pl_subset.rating_available$EstimatedLoss,
+  "Estimated loss by risk category",
+  "AA is lowest risk, HR is highest risk",
+  "Estimated Loss rate")+
+  scale_y_continuous(breaks=seq(0,0.35,0.02))+
+  coord_cartesian(ylim=c(0.01,0.18))
+p2 <- ggplot(data=subset(pl,!is.na(EstimatedLoss)),
+       aes(x=EstimatedLoss,
+           y = ..count../sum(..count..),
+           color = ConcatenatedRating))+
+  geom_freqpoly(binwidth=0.01)+
+  scale_x_continuous(breaks=seq(0.0,0.3,0.05))+
+  scale_y_sqrt(breaks=seq(0,6000,1000))+
+  labs(y='#Listings')+
+  theme(legend.position="top")
+grid.arrange(p1,p2, nrow=1)
+```
+
+*... as expected estimated loss is aligned with risk rating. This is not surprising given Prosper calculates this based on historical performance of Prosper loans with similar characteristics*
+
+##### Loan health trends
+```{r loan_health}
+p1 <- ggplot(data=pl_subset.rating_available,
+             aes(x=LoanOriginationDate.Y, fill=LoanStatus.health))+
+  geom_bar()+
+  coord_cartesian(ylim=c(0,35000))+
+  labs(title="Loan health (Bad=Chargedoff/Defaulted/Past due) by year",
+       x="Orgination year", y="#Loans")+
+  scale_fill_manual(values=c("green3", "red"))+
+  theme(legend.position="none")
+p2 <- ggplot(data=pl_subset.rating_available,
+       aes(x=ConcatenatedRating, fill=LoanStatus.health))+
+  geom_bar()+
+  coord_cartesian(ylim=c(0,35000))+
+  labs(title="... by risk category ", 
+       x="AA is lowest risk, HR is highest risk", y="#Loans")+
+  scale_fill_manual(
+    values=c("green3", "red"),
+    name="Loan health",
+    breaks=c("good", "bad"), labels=c("Good", "Bad"),
+    guide = guide_legend(reverse=TRUE))
+grid.arrange(p1,p2,nrow=1)
+
+ggplot(data=subset(pl_subset.rating_available,
+                   !is.na(ProsperScore) &
+                   LoanStatus.health=="bad"),
+       aes(x=ConcatenatedRating,fill=ProsperScore))+
+  geom_bar(position="fill")+
+  scale_fill_discrete(name="Prosper Score \n(HR=High risk)",
+                      guide = guide_legend(reverse=T))+
+  labs(title="Borrower scores of loans gone bad over the years",
+       x="Listing rating (AA = lowest risk)")+
+  facet_wrap(~LoanOriginationDate.Y,nrow=1)
+
+```
+
+*... grouping loans which either defaulted, charged off or payment delayed as bad loans shows significant decrease in such loans in 2013 (2014 is partial data). It also shows that bad loan ratio is is higher in the higher risk categories (sort of expected).*   
+*I then detailed into borrower scores (as a proxy for valuations) as a starting point to understand underlying  risk assessment by Prosper. Interestingly, bad loans are not necessarily all due to borrowers with lower risk scores. Actually the borrower score "heatmap" by risk rating seems more or less similar over the years across 2011 till 2013 (I exclude 2014 as it has only Q4 data and earlier years due to low volumes).   Further investigation is needed to understand why then there is a higher portion of bad loans in 2012 compared to 2013. One possible factor to exclude would be that 2013 loans might not be through entire lifecycle* 
+
+***
+
+# Univariate Analysis
+
+#### What is the structure of your dataset?
+There are 81 variables and nearly 114000 observations. 
+Data has a pre-July 2009 and post July 2009 break. For example risk rating for pre-July is captured in CreditGrade whereas Alpha has risk ratings post July 2009. Similarly ProsperScore is available only post JUly 2009 and same applies to EstimatedReturns etc.
+Some variables are categorical and hence had to factor them to be able to assess. E.g. ListingCategory. I remapped this one from numerical to a proper label.
+
+#### What is/are the main feature(s) of interest in your dataset?
+I was interested in nature of the loan orginations/trends, credit rating and ROI (yield).
+Specifically this means getting an understanding of
+* Loan size spread (loan amount spread i.e. smaller loans vs larger loans)
+* Is this spread different by risk category?
+* Prosper Ratings allow investors to consider a loan's level of risk 
+* Yields (LenderYield and EstimatedLoss)
+
+#### What other features in the dataset do you think will help support your investigation into your feature(s) of interest?
+Propser rating is what investors use to assess credit grade (AA-lowRisk till HR-highRisk). To understand how this compares to the credit score (I believe this would be FICO) I created mean of CreditScoreRangeLower and CreditScoreRangerUpper. I also ordered the prosper rating so it is ordered against their rating order
+
+#### Did you create any new variables from existing variables in the dataset?
+I created few new variables  
+
+* "Year" variable to group loan orginations by years.
+* ConcatenatedRating variable combining CreditRating (for pre 2009) and Alpha (for post 2009) risk ratings 
+* I used the effective yield to total yield as % to assess returns by risk category (ProsperRating)
+* I created a mean score given credit scores are given in lower and upper bound
+* I also grouped loan status to differentiate b/w good and bad loans: defaulted, charged off and delayed payments.
+
+#### Of the features you investigated, were there any unusual distributions? Did you perform any operations on the data to tidy, adjust, or change the form of the data? If so, why did you do this?
+Loan amounts spike around the 5000 ranges and are interestingly normally distributed in between. Zooming in shows that loan rangers are per 1000 suggesting this could be a pratical minimal loan quantum slab.
+The other anomaly I noticed is that loan amount have near zero variability for high risk ratings esp in 2013 and 2014.
+
+***
+
+# Bivariate Plots Section
+```{r review_corr, warning=TRUE}
+ggcorr(data=subset(pl,!is.na(ProsperScore)),
+       hjust = 0.75, size = 2)+
+  ggtitle("Correlation matrix - excl. non numeric")
+
+```
+*... Overall correlation seems sparse. However there are certain variables where correlation is visible: Investors, Term, Fees, Yield, BorrowerRate, Rating, CreditLimit, Score, LoanOriginalAmount, CreditScore*
+
+```{r review_corr_of_subset}
+#Drilling down into "hot spots" where a correlation seems to be there
+colSet1 <- c("Investors","Term","LoanOriginalAmount",
+          "LP_InterestandFees","LP_ServiceFees","LP_CollectionFees",
+          "BorrowerRate","LenderYield","EstimatedEffectiveYield",
+          "StatedMonthlyIncome",
+          "CreditScoreRangeLower","CreditScoreRangeUpper")
+ggcorr(data=subset(pl,!is.na(ProsperScore))[, colSet1],
+       size = 3, label = TRUE)
+
+#head(subset(pl,is.na(MeanCreditScore))$MeanCreditScore)
+#Focus on key parameters given GGpairs is heavy in computing
+colSet2 <- c("Investors", "LoanOriginalAmount",
+          "LenderYield","StatedMonthlyIncome",
+          "MeanCreditScore","ConcatenatedRating")
+ggpairs(data=subset(pl,!is.na(ProsperScore))[, colSet2])+
+  theme(axis.title=element_text(angle=45,size=8,vjust=1))
+# How to make Y-axis for ggpairs to be made horizontal
+#http://stackoverflow.com/questions/28427572/manipulating-axis-titles-in-ggpairs-ggally
+
+```
+
+*... suggests that key correlation factors of interest would be loan amount, effective yield, credit score (risk) and perceived risk (investors)*
+
+***  
+#### Credit grade - Credit score  vs Prosper rating 
+```{r credit grade assessment}
+ggplot(data=subset(pl_subset.rating_available, !is.na(MeanCreditScore)),
+       aes(x=ConcatenatedRating, y=MeanCreditScore))+
+  geom_jitter(alpha=1/50)+
+  stat_summary(fun.y=mean, geom="point",pch=24,color="white")+
+  stat_summary(fun.y=mean, geom="line",aes(group=1),color="orange",lwd=1)+ 
+  coord_cartesian(ylim=c(400,900))+
+  facet_wrap(~LoanOriginationDate.Y,ncol=9)
+
+```
+
+*...as I would have expected the prosper rating is aligned to the credit scores. Possibly bit on the conservative side for the lower risk categories.
+Trend over the years shows that a narrower credit score range is emerging. Further the risk categories (ratings) are clearly being adjusted*  
+*- relaxation for less riskier ones (e.g. average credit score for AA shifting from 800 to 750 over the years)*  
+*- tightening for the more risker ones (average credit score for HR 500 to 600)*
+
+***  
+#### Salary vs Loan originations by risk rating
+```{r Salary_}
+cor(pl$StatedMonthlyIncome,pl$LoanOriginalAmount)
+p1 <- ggplot(data=subset(pl_subset.rating_available,StatedMonthlyIncome < 50000),
+             aes(x=StatedMonthlyIncome, y=LoanOriginalAmount))+
+  geom_point(color="orange", alpha = 1/50, 
+             position = position_jitter(h=0.1,w=0.1))+
+  geom_smooth()+
+  coord_cartesian(xlim=c(0,20000),ylim=c(0,20000))
+
+p2 <- p1 + facet_wrap(~ConcatenatedRating,1)
+
+grid.arrange(p1,p2,nrow=2)
+```
+
+*While reading the [typical compliants made by borrowers](http://www.lendingmemo.com/prosper-loan-complaints/) one of the main struggles highlighted  with Prosper was getting approval for loan. The information provided there further highlights that Prosper prefers borrower with a good salary.*  
+*Given loans are unsecured, I hypothesised that a key reason could be that salary is used as a direct measure in mitigating the risk*  
+
+***  
+#### Comparing other parameters against risk
+```{r compare_risk_to_params}
+plByRating <- group_by(subset(pl,!is.na(ConcatenatedRating)),
+                       ConcatenatedRating)
+plMean <- 
+  summarise(plByRating,
+            mean_LY = mean(LenderYield),
+            mean_BR = mean(BorrowerRate),
+            mean_EY = mean(EstimatedEffectiveYield, na.rm=TRUE),
+            mean_IF = mean(LP_InterestandFees),
+            mean_SF = mean(LP_ServiceFees),
+            mean_CF = mean(LP_CollectionFees),
+            mean_Investors = mean(Investors),
+            mean_Term = mean(Term),
+            mean_MonthlyIncome = mean(StatedMonthlyIncome))
+
+p01 <- my.bar.plots(plMean,
+                 plMean$ConcatenatedRating, plMean$mean_LY,
+                 "LenderYield", "Risk Rating", "Average")
+p02 <- my.bar.plots(plMean,
+                 plMean$ConcatenatedRating, plMean$mean_BR,
+                 "BorrowerRate", "Risk Rating", "Average")
+p03 <- my.bar.plots(plMean,
+                 plMean$ConcatenatedRating, plMean$mean_EY,
+                 "EffectiveYield", "Risk Rating", "Average")
+p11 <- my.bar.plots(plMean,
+                 plMean$ConcatenatedRating, plMean$mean_IF,
+                 "Interest&Fees ($)", "Risk Rating", "Average")
+p12 <- my.bar.plots(plMean,
+                 plMean$ConcatenatedRating, plMean$mean_SF,
+                 "ServiceFees ($)", "Risk Rating", "Average")
+p13 <- my.bar.plots(plMean,
+                 plMean$ConcatenatedRating, plMean$mean_CF,
+                 "CollectionFees ($)", "Risk Rating", "Average")
+p21 <- my.bar.plots(plMean,
+                 plMean$ConcatenatedRating, plMean$mean_Investors,
+                 "# Investors", "Risk Rating", "Average")
+p22 <- my.bar.plots(plMean,
+                 plMean$ConcatenatedRating, plMean$mean_Term,
+                 "Term (in months)", "Risk Rating", "Average")
+p23 <- my.bar.plots(plMean,
+                 plMean$ConcatenatedRating, plMean$mean_MonthlyIncome,
+                 "MonthlyIncome ($)", "Risk Rating", "Average")
+
+grid.arrange(p01,p02,p03,
+             p11,p12,p13,
+             p21,p22,p23,
+             ncol=3)
+```
+
+*... Interest and (orgination) fees increase with higher risk categories but is lower for highest two categories (wondering why?)*
+
+*In contrast service fees decrease for higher risk categories. This must be to due to lower loan amounts and payment time frames. Hence a median value of the service fee in $ amount is not meaningful. Better would be to compute service fee in relation to the loan amount.*  
+
+*Similary  collection fees are higher on average for higher risk categories with some anamolies (e.g. cat E has lower collection fees on average than cat D).*  
+*Further analysis required to understand what these data points are telling*  
+*- Unsurprisingly investor size dwindles for higher risk (above C) categories.*  
+*- Equally unsurprising is the fact that those earning less are categorized as higher risk.*  
+
+
+***  
+
+# Bivariate Analysis
+
+#### Talk about some of the relationships you observed in this part of the investigation. How did the feature(s) of interest vary with other features in the dataset?
+Prosper ratings are very well tuned to underlying risk (credit scores) and trend over the years shows that Prosper is managing the loans towards a tight range b/w average credit score of 600 to 800 . 
+
+#### Did you observe any interesting relationships between the other features (not the main feature(s) of interest)?
+* With increasing salary, loan amounts seem to increase as well.    
+* Strangely there is a dip in loan amounts in the lower salary ranges. This could be either due to Prosper limiting loans for this segment (less likely given the dip) or folks in that salary band requiring lower loan amounts compared to their salary (most likely the case).
+* There is clear outlier at salary = 0. By digging into the employment status it is clear that this in part due to loans being made to non working folks 
+
+#### What was the strongest relationship you found?
+LenderYields are strongly related to the credit scores. Interestingly Propser risk averseness is being lowered (ableit not significantly) over the years. This could be also due to competition from other peer-to-peer lenders (e.g. LendingClub).
+
+# Multivariate Plots Section
+##### LenderYield vs MeanScore vs LoanOriginalAmount####
+```{r ly_meanscore_loanamount}
+#years <- c(2008,2013,2014)
+ggplot(data=subset(pl,!is.na(MeanCreditScore)),
+       aes(x=MeanCreditScore,y=LenderYield, color=LoanOriginalAmount))+
+  geom_point(position = "jitter", alpha = 0.3)+
+  geom_smooth(color="orange")+
+  coord_cartesian(ylim=c(-0.05,0.35))+
+  facet_wrap(~LoanOriginationDate.Y, ncol=3, scales = "free_x")
+ggplot(data=subset(pl,!is.na(MeanCreditScore)),
+       aes(x=MeanCreditScore,y=LenderYield,
+           size=LoanOriginalAmount, color=ConcatenatedRating))+
+  geom_point(position = "jitter",alpha = 0.4)+
+  geom_smooth(color="blue")+
+  coord_cartesian(ylim=c(-0.05,0.35))+
+  facet_wrap(~LoanOriginationDate.Y, ncol=3, scales = "free_x")
+```
+
+*... Excluding the outliers in 2006 and 2007, lenderyield curve trends towards a near linear alignment to the credit score. Yields trend to a decent 5% for loans for the most safest loans i.e. credit score of more then 800. Coupled with larger loan amounts this is something I would consider investing in providing for good cashflow.* 
+
+***  
+##### Loss and setting the borrower rate####
+``` {r estimatedloss_montlyincome_risk}
+p1 <- ggplot(data=pl,aes(x=StatedMonthlyIncome, fill=ConcatenatedRating))+
+  geom_histogram(binwidth=1000)+
+  scale_x_discrete(breaks=seq(0,20000,1000))+
+  coord_cartesian(xlim=c(0,20000))+
+  geom_vline(aes(xintercept=mean(StatedMonthlyIncome)),
+            color="black", linetype="dashed", size=1)+
+  guides(fill = guide_legend("",reverse = T))+
+  theme(axis.text.x=element_text(angle=90))
+p2 <- ggplot(data=subset(pl,!is.na(DebtToIncomeRatio)),
+             aes(x=DebtToIncomeRatio, fill=ConcatenatedRating))+
+  geom_histogram(binwidth=0.02)+
+  coord_cartesian(xlim=c(0,1.25))+
+  geom_vline(aes(xintercept=mean(DebtToIncomeRatio)),
+            color="black", linetype="dashed", size=1)+
+  theme(legend.position="none")
+
+#Income vs return compared to underlying risk
+p3 <- ggplot(data=subset(pl_subset.rating_available, StatedMonthlyIncome < 20000),
+       aes(x=StatedMonthlyIncome,y=EstimatedLoss, color=ConcatenatedRating))+
+  geom_point(alpha=1/10, position=position_jitter(w=0.2,h=0.01))+
+  geom_smooth(color="blue")+
+  coord_cartesian(xlim=c(0,20000),ylim=c(0,0.25))+
+  guides(color = guide_legend("",reverse=T, override.aes = list(alpha = 1)))
+p4 <- ggplot(data=subset(pl_subset.rating_available, 
+                         StatedMonthlyIncome < 20000 &
+                           !is.na(DebtToIncomeRatio)),
+       aes(x=DebtToIncomeRatio,y=BorrowerRate, 
+           color=ConcatenatedRating))+
+  geom_point(alpha=1/20, position=position_jitter(w=0.01,h=0.01))+
+  geom_smooth(color="blue")+
+  coord_cartesian(xlim=c(0,0.8),ylim=c(0,0.38))+
+  theme(legend.position="none")
+grid.arrange(p1,p2,p3,p4,nrow=2)
+```
+
+*...Estimated loss decreases with increasing income. Note that I have capped the salary at 10'000 as data is sparse above this range. Regression line flattens to ~6%.*  
+*Comparing the debt to income ratio to borrower rate highlights that higher leverage exposure increases borrower rate. However I was surprised that the regression line was not steeper - is near linear and pretty flat*
+
+***  
+##### Leverage####
+``` {r leverage}
+p1 <- ggplot(data=pl,
+       aes(x=EmploymentStatus))+
+  geom_bar()
+#table(pl$EmploymentStatus)
+empl.status <- c("Employed","Full-time", "Self-employed")
+sal.cap <- 30000
+sal.lower <- 0
+p2 <- ggplot(data=subset(pl_subset.rating_available,
+                         EmploymentStatus %in% empl.status),
+       aes(x=StatedMonthlyIncome,
+           y=DebtToIncomeRatio, 
+           color=ConcatenatedRating, 
+           size=LoanOriginalAmount))+
+  geom_point(alpha=1/20, position=position_jitter(w=0.4, h=0.1))+
+  geom_smooth(color="orange")+
+  scale_x_continuous(limits=c(sal.lower,sal.cap),
+                     breaks=seq(sal.lower,sal.cap,2500))+
+  coord_cartesian(xlim=c(0,sal.cap), ylim=c(0,1))+
+  guides(color = guide_legend("Risk", 
+                              reverse=TRUE,override.aes = list(alpha = 1)))+
+  facet_wrap(~EmploymentStatus,3)
+grid.arrange(p1,p2,ncol=2)
+```
+
+*....majority of borrowers are salaried employees. Leverage for this group shows some very interesting patterns. The debt ratio is very varied for those in the lower salary bracket. The regression model "swings"" massively in this range and then as salaries ranges increase, a near constant debt to income ratio emerges. Interestingly amplititude increases for those categorized as "self-employed"*  
+
+# Multivariate Analysis
+
+#### Talk about some of the relationships you observe in this part of the investigation. Were there features that strengthened each other in terms of looking at your feature(s) of interest?
+Initially I started to focus on yield taking an investor's point of view. It turned out that salary (as stated by borrower) and leverage (debt to income) were better parameter to observe. Given credit score and prosper rating are closely aligned, using the risk rating as an additional variable provided a differentiated picture. This led me to then look at the employment status of the borrowers in more detail. Insight was that majority of prosper borrowers are salaried. 
+
+#### Were there any interesting or surprising interactions between features?
+The debt ratio is very varied for those in the lower salary bracket. The regression model "swings"" massively in this range and as salary ranges increase, a near constant debt to income ratio emerges. Interestingly amplititude increases for those categorized as "self-employed"
+
+#### OPTIONAL: Did you create any models with your dataset? Discuss the strengths and limitations of your model.  
+
+*Work in progress. An area of focus I would be interested is in forecasting loans going sour.*  
+
+------
+
+# Final Plots and Summary
+
+### Plot One
+```{r Plot_One}
+p1 <- my.box.plots(pl_subset.rating_available,
+               pl_subset.rating_available$ConcatenatedRating,
+               pl_subset.rating_available$LenderYield,
+               "Lender yield by risk",
+               "AA is lowest risk, HR is highest risk","LenderYield")+
+  scale_y_continuous(breaks=seq(0,0.35,0.01))+
+  coord_cartesian(ylim=c(0.05,0.30))
+p2 <- my.box.plots(pl_subset.rating_available,
+             pl_subset.rating_available$ConcatenatedRating,
+             pl_subset.rating_available$EstimatedReturn,
+             "Estimated return by risk",
+             "AA is lowest risk, HR is highest risk","Estimated return")+
+  scale_y_continuous(breaks=seq(0,0.35,0.01))+
+  coord_cartesian(ylim=c(0.05,0.30))
+p3 <- ggplot(data=subset(pl,!is.na(EstimatedReturn)),
+       aes(x=ConcatenatedRating, y=EstimatedReturn/LenderYield))+
+  geom_boxplot()+
+  stat_summary(fun.y=mean, geom="point",pch=24,color="blue")+
+  stat_summary(fun.y=mean, geom="line",aes(group=1),color="orange",lwd=1)+
+  scale_y_continuous(breaks=seq(0,1,0.1))+
+  coord_cartesian(ylim=c(0.35,.9))+
+  labs(title="Estimated return by risk",
+       x="AA is lowest risk, HR is highest risk",y="ROI (return/yield)")
+grid.arrange(p1,p2,p3,nrow=1)
+```
+
+### Description One
+LenderYield as a measure of expected returns clearly shows an increase with higher risk.
+The estimated return also shows a similar pattern though variablity is significantly different. Further average estimated return descreases as risk increases and actually drops for the HR risk category.
+Finally tying this together and using the Estimated return in relation to the interest rate shows a total different picture. For higher risk the ratio drops drastically which confirms that pushing for higher yield without understanding the underlying risk is not always a profitable endveaour.
+
+### Plot Two
+```{r Plot_Two}
+#cor(pl$StatedMonthlyIncome,pl$LoanOriginalAmount)
+inc_limit <- 20000
+p1 <- ggplot(data=subset(pl_subset.rating_available,
+                         StatedMonthlyIncome < inc_limit &
+                           !is.na(ProsperScore)),
+             aes(x=StatedMonthlyIncome, y=LoanOriginalAmount))+
+  geom_point(color="orange", alpha = 1/10, 
+             position = position_jitter(h=0.1,w=0.1))+
+  geom_smooth()+
+  coord_cartesian(xlim=c(0,inc_limit))+
+  scale_x_continuous(breaks=seq(0,inc_limit,2000))+
+  labs(title="Loan amounts and stated monthly income (< 50k)",
+       x="Stated Monthly Income ($)",
+       y="Loan Original Amount ($)")
+
+p2 <- p1+
+  labs(title="... by borrower score")+
+  scale_x_continuous(breaks=seq(0,inc_limit,10000))+
+  facet_wrap(~ProsperScore,1)
+
+grid.arrange(p1,p2,nrow=2)
+
+#Created this to report in description two below
+pl_subset.newSalRange <- subset(pl,StatedMonthlyIncome %in% c(2000,15000))
+
+```
+
+### Description Two
+While reading the [typical compliants made by borrowers](http://www.lendingmemo.com/prosper-loan-complaints/) one of the main struggles highlighted  with Prosper was getting approval for loan. The information provided there further highlights that Prosper prefers borrower with a good salary and job.
+Given loans are unsecured, I hypothesised that a key reason could be that salary is used as a direct measure in mitigating the risk.
+
+Above plots also show following:
+
+* With increasing salary and excluding the outliers, loan amounts increase as well. 
+This correlates very well for salary ranges from 2k to 15k with cor = 
+`r cor(pl_subset.newSalRange$StatedMonthlyIncome, pl_subset.newSalRange$LoanOriginalAmount)`
+). This compared to an overall correlation factor across all salary ranges of 
+`r cor(pl$StatedMonthlyIncome, pl$LoanOriginalAmount)`.  
+* The significant outliers outside of these "middle income" ranges highlight  that
++ a dip in loan amounts in the lower salary ranges. This is to be attributed to the fact that in these ranges, non working folks are included  
++ for higher salary ranges, reason for outliers is mainly due to sparse loan originations. Due to this I can imagine that a more adhoc pricing approach is followed by Prosper in these ranges and making assessments more prone to error.
+
+### Plot Three
+```{r Plot_Three}
+years <- c(2008,2013,2014)
+p1 <- ggplot(data=subset(pl,!is.na(MeanCreditScore) &
+                           LoanOriginationDate.Y %in% years),
+       aes(x=MeanCreditScore,y=LenderYield, color=LoanOriginalAmount))+
+  geom_point(position = "jitter", alpha = 0.4)+
+  geom_smooth(color="orange")+
+  scale_color_gradient(name="Loan amount", 
+                       low="blue", high="cyan", trans = "sqrt")+
+  coord_cartesian(ylim=c(0,0.35))+
+  facet_wrap(~LoanOriginationDate.Y, ncol=3, scales = "free_x")+
+  labs(
+    title="Lender Yields compared to Credit Score mean by Loan Amounts and risk")
+p2 <- ggplot(data = subset(pl,!is.na(MeanCreditScore) & 
+                           LoanOriginationDate.Y %in% years),
+       aes(x = MeanCreditScore, y = LenderYield,
+           color = ConcatenatedRating))+
+  geom_point(position = "jitter",alpha = 0.4)+
+  scale_color_discrete(name="Listing rating",
+                      guide = guide_legend(reverse=T))+
+  geom_smooth(color="blue")+
+  coord_cartesian(ylim=c(0,0.35))+
+  facet_wrap(~LoanOriginationDate.Y, ncol=3, scales = "free_x")
+grid.arrange(p1,p2,nrow=2)
+
+```
+
+### Description Three
+
+Focusing on the "stable" years of 2008 and 2013 onwards, I see that lender yield curve trends towards a near linear alignment to the credit score. Yields achieve decent 5% for loans with near risk free credit score of more then 800 even though the yields are significanlty lower compared to the more risker loans. However, given that larger loan amounts in this range which will deliver a higher (monthly) cashflow in absolute terms, this woudl be my sweet-spot where I would consider investing.
+
+Other interesting observations from this chart
+
+* With the recovery starting from 2012 onwards, loan sizes are increasing (see the lighter hue along the average yield curve). Interestingly lender yields have come under pressure over the years for the lower risk grade loans. E.g. in the intial years the larger loans had a much higher yield. This suggests a leveling-off and adjustment of the risk permium in-line with risk as Prosper gets a better handle of pricing the loans.  
+* Related to above point is another interesting observation. In the early years as shown for 2008 the yield spread appears to be priced by Prosper in verticals i.e. each risk rating had an equal yield spread. However over time the yields seem to have evolved (stretched) horizontally i.e. the lower risk rated loans (i.e. AA/A/B) have tighter yield ranges while allowing for a broader credit scores range. This "layering" and also allowing for a broader range of scores per risk rating in my view is a direct result of the expansion of the client base for Prosper as well as improved pricing (yield) model.  
+* What also clearly sticks out is that smaller loan amounts are typical for riskier loans (smaller "bubbles" for higher risk listings). This suggests that risk is limitedby restricting loan size for loans of higher risk credit grade. Conversely and unsurprising is that lender yield is much higher given higher risk. However as I had observed above this is offset by higher fees and default risk.  
+
+------
+
+# Reflection
+
+1. The loan originations dropped drastically in 2009. But then picked up pretty quickly into 2013. 2014 data is only Q1 but loan levels are at 50% of 2013! This suggests that peer to peer lending has picked up. Will be interesting to see how this trend continues into 2015.
+2. As an investor, unsecured lending inherently poses risk of losing everything. This might also suggest why loan amounts are at micro levels. A suggestion would be that Prosper offers "collateral" as in a fixed insured investment return in case of borrower default similar to a credit default swap. This would motivate investors to lend money for more riskier loans. 
+3. Analyzing the data points clearly highlights the opportunities of P2P lending. It seems best suited for the lower to middle income population. Borrowers funding requirements are for the more regular (mundane) financial needs in contrast to larger big ticket items which require banks to fund. On the other hand investors seem to be those interested in getting a regular income and not necessarily looking for appreciation.    
+4. Quality of the data clearly shows that there is pre and post 2009 period. The pre-2009 is marked by Prosper establishing their business model and inherently outlier prone. Unfortunatley as their business model firms up, the 2009 crisis jolts it significantly. Starting from 2012 onwards I see a stabilization and trends starting to emerge esp from 2013 onwards.
+
+On a personal note: I thoroughly enjoyed this project even though it was a quite a challenge. The sheer number of parameters to connect is daunting and then to craft into a "story" is a key challenge. I realised that understanding the underlying domain is crucial as this allows to ask prodding questions. This combined with each insight then allows for an iterative approach of piecing together the puzzle.
+Thanks for this well designed learning experience.
